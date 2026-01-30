@@ -220,6 +220,8 @@ async def convert_openai_streaming_to_claude_with_cancellation(
     http_request: Request,
     openai_client,
     request_id: str,
+    turn_log=None,
+    start_time=None,
 ):
     """Convert OpenAI streaming response to Claude streaming format with cancellation support."""
 
@@ -383,3 +385,14 @@ async def convert_openai_streaming_to_claude_with_cancellation(
 
     yield f"event: {Constants.EVENT_MESSAGE_DELTA}\ndata: {json.dumps({'type': Constants.EVENT_MESSAGE_DELTA, 'delta': {'stop_reason': final_stop_reason, 'stop_sequence': None}, 'usage': usage_data}, ensure_ascii=False)}\n\n"
     yield f"event: {Constants.EVENT_MESSAGE_STOP}\ndata: {json.dumps({'type': Constants.EVENT_MESSAGE_STOP}, ensure_ascii=False)}\n\n"
+    
+    # Record metrics
+    if turn_log and start_time:
+        import time
+        turn_log.latency_ms = int((time.time() - start_time) * 1000)
+        turn_log.prompt_tokens = usage_data.get('input_tokens', 0)
+        turn_log.completion_tokens = usage_data.get('output_tokens', 0)
+        
+        from src.core.metrics import get_metrics_service
+        metrics_service = get_metrics_service()
+        metrics_service.record_turn(turn_log)

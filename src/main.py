@@ -1,5 +1,6 @@
 from fastapi import FastAPI
 from src.api.endpoints import router as api_router
+from src.api.dashboard import dashboard_router
 import uvicorn
 import sys
 from src.core.config import config
@@ -7,6 +8,7 @@ from src.core.config import config
 app = FastAPI(title="Claude-to-OpenAI API Proxy", version="1.0.0")
 
 app.include_router(api_router)
+app.include_router(dashboard_router)
 
 
 def main():

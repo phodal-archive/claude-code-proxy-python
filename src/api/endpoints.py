@@ -2,6 +2,7 @@ from fastapi import APIRouter, HTTPException, Request, Header, Depends
 from fastapi.responses import JSONResponse, StreamingResponse
 from datetime import datetime
 import uuid
+import time
 from typing import Optional
 
 from src.core.config import config
@@ -14,6 +15,7 @@ from src.conversion.response_converter import (
     convert_openai_streaming_to_claude_with_cancellation,
 )
 from src.core.model_manager import model_manager
+from src.core.metrics import get_metrics_service, TurnLog
 
 router = APIRouter()
 
@@ -53,12 +55,18 @@ async def validate_api_key(x_api_key: Optional[str] = Header(None), authorizatio
 @router.post("/v1/messages")
 async def create_message(request: ClaudeMessagesRequest, http_request: Request, _: None = Depends(validate_api_key)):
     try:
+        start_time = time.time()
         logger.debug(
             f"Processing Claude request: model={request.model}, stream={request.stream}"
         )
 
         # Generate unique request ID for cancellation tracking
         request_id = str(uuid.uuid4())
+        turn_id = str(uuid.uuid4())
+        
+        # Extract user ID from headers or use default
+        user_id = http_request.headers.get("X-User-ID", "anonymous")
+        session_id = http_request.headers.get("X-Session-ID", str(uuid.uuid4()))
 
         # Convert Claude request to OpenAI format
         openai_request = convert_claude_to_openai(request, model_manager)
@@ -73,6 +81,27 @@ async def create_message(request: ClaudeMessagesRequest, http_request: Request, 
                 openai_stream = openai_client.create_chat_completion_stream(
                     openai_request, request_id
                 )
+                
+                # Prepare turn log
+                last_user_message = ""
+                if request.messages:
+                    last_msg = request.messages[-1]
+                    if isinstance(last_msg.content, str):
+                        last_user_message = last_msg.content
+                    elif isinstance(last_msg.content, list) and last_msg.content:
+                        last_user_message = getattr(last_msg.content[0], 'text', '')
+                
+                turn_log = TurnLog(
+                    turn_id=turn_id,
+                    user_id=user_id,
+                    session_id=session_id,
+                    timestamp=time.time(),
+                    model=request.model,
+                    stream=True,
+                    last_user_message_preview=last_user_message[:100],
+                    last_user_message=last_user_message,
+                )
+                
                 return StreamingResponse(
                     convert_openai_streaming_to_claude_with_cancellation(
                         openai_stream,
@@ -81,6 +110,8 @@ async def create_message(request: ClaudeMessagesRequest, http_request: Request, 
                         http_request,
                         openai_client,
                         request_id,
+                        turn_log,
+                        start_time,
                     ),
                     media_type="text/event-stream",
                     headers={
@@ -110,6 +141,37 @@ async def create_message(request: ClaudeMessagesRequest, http_request: Request, 
             claude_response = convert_openai_to_claude_response(
                 openai_response, request
             )
+            
+            # Record metrics
+            latency_ms = int((time.time() - start_time) * 1000)
+            prompt_tokens = openai_response.get("usage", {}).get("prompt_tokens", 0)
+            completion_tokens = openai_response.get("usage", {}).get("completion_tokens", 0)
+            
+            last_user_message = ""
+            if request.messages:
+                last_msg = request.messages[-1]
+                if isinstance(last_msg.content, str):
+                    last_user_message = last_msg.content
+                elif isinstance(last_msg.content, list) and last_msg.content:
+                    last_user_message = getattr(last_msg.content[0], 'text', '')
+            
+            turn_log = TurnLog(
+                turn_id=turn_id,
+                user_id=user_id,
+                session_id=session_id,
+                timestamp=start_time,
+                model=request.model,
+                stream=False,
+                last_user_message_preview=last_user_message[:100],
+                last_user_message=last_user_message,
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                latency_ms=latency_ms,
+            )
+            
+            metrics_service = get_metrics_service()
+            metrics_service.record_turn(turn_log)
+            
             return claude_response
     except HTTPException:
         raise
